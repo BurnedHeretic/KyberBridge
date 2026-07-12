@@ -1,0 +1,63 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<PackageIcon>KyberBridge Icon.png</PackageIcon>
+		<ApplicationIcon>icon.ico</ApplicationIcon>
+		<FileVersion>1.0</FileVersion>
+	</PropertyGroup>
+	<ItemGroup>
+	  <None Remove="Runtime\kyber_cli.exe" />
+	  <None Remove="Runtime\maxima-bootstrap.exe" />
+	  <None Remove="Runtime\maxima-service.exe" />
+	  <None Remove="Runtime\rust_lib.dll" />
+	</ItemGroup>
+	<ItemGroup>
+	  <Content Include="icon.ico" />
+	  <Content Include="Runtime\kyber_cli.exe">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	  </Content>
+	  <Content Include="Runtime\maxima-bootstrap.exe">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	  </Content>
+	  <Content Include="Runtime\maxima-service.exe">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	  </Content>
+	  <Content Include="Runtime\rust_lib.dll">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	  </Content>
+	</ItemGroup>
+	<ItemGroup>
+	  <None Include="..\..\KyberBridge Icon.png">
+	    <Pack>True</Pack>
+	    <PackagePath>\</PackagePath>
+	  </None>
+	</ItemGroup>
+
+	<ItemGroup>
+		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Grpc.AspNetCore" Version="2.80.0" />
+		<PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
+		<PackageReference Include="Google.Protobuf" Version="3.31.1" />
+		<PackageReference Include="Grpc.Tools" Version="2.80.0" PrivateAssets="All" />
+		<PackageReference Include="Tomlyn" Version="2.3.2" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Protobuf Include="Proto\kyber_common.proto" GrpcServices="Both" />
+		<Protobuf Include="Proto\kyber_interface.proto" GrpcServices="Both" />
+		<Protobuf Include="Proto\kyber_api.proto" GrpcServices="Api" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <None Update="KyberBridge.png">
+	    <Pack>True</Pack>
+	    <PackagePath>\</PackagePath>
+	  </None>
+	</ItemGroup>
+</Project>
