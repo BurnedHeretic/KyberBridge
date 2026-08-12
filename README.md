@@ -60,5 +60,11 @@ After the match ends, KyberBridge writes `BattleResult.json`, which the Galactic
 
 ---
 
-Credit to the Kyber team for the Kyber launcher and for making this possible!
+## Credits
+
+This project is built as a companion tool for use with Kyber private servers.
+
+Huge credit and thanks to the Kyber team / Armchair Developers for creating and maintaining Kyber, Maxima, the Kyber Launcher, Kyber server tools, and the wider private-server ecosystem that makes my Battlefront II projects possible.
+
+Additional credit to the wider Star Wars Battlefront II modding community for tools, guides, discoveries, and documentation around Frosty, gameplay modding, Kyber-compatible mods, and private server workflows.
 Kyber source can be found here: https://github.com/ArmchairDevelopers/Kyber
