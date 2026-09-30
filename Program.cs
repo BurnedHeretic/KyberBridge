@@ -1,6 +1,4 @@
-﻿using Grpc.Net.Client;
-using Grpc.Core;
-using KyberApi;
+using Grpc.Net.Client;
 using KyberCommon;
 using KyberInterface;
 using System;
@@ -159,9 +157,6 @@ class Program
                 throw new Exception("KYBER Launcher installation not found.");
             }
 
-            string token = GetKyberToken();
-            Console.WriteLine("Kyber token loaded.");
-
             try
             {
                 Console.WriteLine("Launching Kyber launcher...");
@@ -189,6 +184,12 @@ class Program
 
             await Task.Delay(2000);
 
+            // The current Kyber CLI performs its own Maxima -> Kyber authentication
+            // inside start_game. We no longer scrape or pass the Maxima access token.
+            // Verify that the official launcher has installed the shared Kyber module
+            // before bypassing the CLI's pre-authentication module updater.
+            VerifyKyberModule();
+
             Console.WriteLine("Launching Battlefront 2 through Kyber...");
 
             string cliPath = Path.Combine(runtimeDir, "kyber_cli.exe");
@@ -209,7 +210,7 @@ class Program
             var startInfo = new ProcessStartInfo
             {
                 FileName = cliPath,
-                Arguments = BuildStartGameArguments(token, rawModsPath),
+                Arguments = BuildStartGameArguments(rawModsPath),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -266,6 +267,14 @@ class Program
             while (kyberPort == -1)
             {
                 await Task.Delay(500);
+
+                if (cliProcess.HasExited)
+                {
+                    throw new Exception(
+                        $"Kyber CLI exited before opening its RPC port (exit code {cliProcess.ExitCode}). " +
+                        "Check the Kyber CLI output above for the authentication or launch error."
+                    );
+                }
 
                 if ((DateTime.Now - portWaitStart).TotalSeconds > 60)
                 {
@@ -339,16 +348,6 @@ class Program
 
             Console.WriteLine($"Kyber Server ID: {serverId}");
 
-            var apiChannel = GrpcChannel.ForAddress("https://api.prod.kyber.gg");
-
-            var serverManagementClient =
-                new KyberApi.ServerManagement.ServerManagementClient(apiChannel);
-
-            var apiHeaders = new Metadata
-{
-    { "authorization", token }
-};
-
             Console.WriteLine();
             Console.WriteLine("====================================");
             Console.WriteLine("SERVER STARTED SUCCESSFULLY");
@@ -364,9 +363,9 @@ class Program
             await Task.Delay(3000);
 
             await AssignConfiguredPlayersToTeamsAsync(
-    commonClient,
-    battleData
-);
+                commonClient,
+                battleData
+            );
 
             if (IsSpaceBattle(battleType))
             {
@@ -452,8 +451,8 @@ class Program
     }
 
     static async Task AssignConfiguredPlayersToTeamsAsync(
-    Common.CommonClient commonClient,
-    BattleData battleData)
+        Common.CommonClient commonClient,
+        BattleData battleData)
     {
         if (battleData.Players == null || battleData.Players.Count == 0)
         {
@@ -711,9 +710,9 @@ class Program
     }
 
     static async Task RunServerCommandAsync(
-    Common.CommonClient commonClient,
-    string command,
-    int delayAfterMs = 750)
+        Common.CommonClient commonClient,
+        string command,
+        int delayAfterMs = 750)
     {
         if (string.IsNullOrWhiteSpace(command))
         {
@@ -952,9 +951,12 @@ class Program
         );
     }
 
-    static string BuildStartGameArguments(string token, string rawModsPath)
+    static string BuildStartGameArguments(string rawModsPath)
     {
-        string arguments = $"start_game --token {token}";
+        // The current Kyber CLI performs its own Maxima -> Kyber authentication inside
+        // start_game. The CLI module-update check runs before that authentication, so
+        // skip the updater here and use the module maintained by the official launcher.
+        string arguments = "--skip-updates start_game";
 
         if (!string.IsNullOrWhiteSpace(rawModsPath))
         {
@@ -1584,53 +1586,55 @@ class Program
         return false;
     }
 
-    static string GetKyberToken()
+    static void VerifyKyberModule()
     {
-        string maximaPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "ArmchairDevelopers",
-            "Maxima",
-            "data"
+        string programData = Environment.GetFolderPath(
+            Environment.SpecialFolder.CommonApplicationData
         );
 
-        Console.WriteLine($"Searching for auth file in: {maximaPath}");
-
-        if (!Directory.Exists(maximaPath))
+        if (string.IsNullOrWhiteSpace(programData))
         {
-            throw new Exception("Maxima data directory not found.");
+            programData = Environment.GetEnvironmentVariable("ProgramData")
+                ?? @"C:\ProgramData";
         }
 
-        string authFile = Directory
-            .GetFiles(maximaPath, "auth.toml", SearchOption.AllDirectories)
-            .FirstOrDefault();
+        string moduleDir = Path.Combine(
+            programData,
+            "Kyber",
+            "Module"
+        );
 
-        if (authFile == null)
+        string modulePath = Path.Combine(moduleDir, "Kyber.dll");
+        string versionPath = Path.Combine(moduleDir, "VERSION");
+
+        if (!File.Exists(modulePath))
         {
-            throw new Exception("Auth file not found.");
+            throw new Exception(
+                "Kyber module is not installed. Open the official KYBER Launcher, " +
+                "allow it to finish installing/updating Kyber, then start Galactic Conquest again."
+            );
         }
 
-        string content = File.ReadAllText(authFile);
+        Console.WriteLine($"Kyber module found: {modulePath}");
 
-        var accountMatch = Regex.Match(content, "\"([0-9]+)\"");
-
-        if (!accountMatch.Success)
+        if (File.Exists(versionPath))
         {
-            throw new Exception("Could not detect account ID.");
+            string version = File.ReadAllText(versionPath).Trim();
+
+            if (!string.IsNullOrWhiteSpace(version))
+            {
+                Console.WriteLine($"Kyber module version: {version}");
+            }
+        }
+        else
+        {
+            Console.WriteLine(
+                "Kyber module VERSION file was not found. Continuing with the installed module."
+            );
         }
 
-        string accountId = accountMatch.Groups[1].Value;
-        Console.WriteLine($"Selected account: {accountId}");
-
-        var tokenMatch = Regex.Match(content, @"access_token\s*=\s*""([^""]+)""");
-
-        if (!tokenMatch.Success)
-        {
-            throw new Exception("Access token not found in auth file.");
-        }
-
-        string token = tokenMatch.Groups[1].Value;
-        Console.WriteLine("Access token found.");
-
-        return token;
+        Console.WriteLine(
+            "Kyber CLI update check will be skipped; Kyber CLI will handle authentication during start_game."
+        );
     }
 }
