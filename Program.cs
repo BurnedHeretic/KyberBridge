@@ -184,11 +184,16 @@ class Program
 
             await Task.Delay(2000);
 
-            // The current Kyber CLI performs its own Maxima -> Kyber authentication
-            // inside start_game. We no longer scrape or pass the Maxima access token.
-            // Verify that the official launcher has installed the shared Kyber module
-            // before bypassing the CLI's pre-authentication module updater.
+            // The current Kyber CLI performs its own Maxima -> Kyber authentication.
+            // We no longer scrape or pass the Maxima access token. The official launcher
+            // owns module updates, while this bridge starts the playable in-process server
+            // through Kyber's start_server initialization flow.
             VerifyKyberModule();
+
+            var launchData = ResolveBattleLaunch(destinationPlanet, battleType);
+
+            Console.WriteLine($"Resolved Map: {launchData.Map}");
+            Console.WriteLine($"Resolved Mode: {launchData.Mode}");
 
             Console.WriteLine("Launching Battlefront 2 through Kyber...");
 
@@ -205,12 +210,17 @@ class Program
             }
 
             int kyberPort = -1;
-            bool frontendReady = false;
 
             var startInfo = new ProcessStartInfo
             {
                 FileName = cliPath,
-                Arguments = BuildStartGameArguments(rawModsPath),
+                Arguments = BuildStartServerArguments(
+                    destinationPlanet,
+                    battleType,
+                    launchData.Map,
+                    launchData.Mode,
+                    rawModsPath
+                ),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -218,6 +228,12 @@ class Program
                 WindowStyle = ProcessWindowStyle.Hidden,
                 WorkingDirectory = runtimeDir
             };
+
+            // Current Kyber gates start_server behind this explicit acknowledgement,
+            // even when --no-dedicated is used. This is scoped only to the child CLI.
+            startInfo.Environment[
+                "KYBER_BYPASS_DOCKER_I_REALLY_KNOW_WHAT_I_AM_DOING"
+            ] = "1";
 
             cliProcess = new Process();
             cliProcess.StartInfo = startInfo;
@@ -231,20 +247,20 @@ class Program
 
                 Console.WriteLine(e.Data);
 
-                if (e.Data.Contains("Kyber will listen on port"))
+                if (e.Data.Contains("Kyber will listen on port", StringComparison.OrdinalIgnoreCase) ||
+                    e.Data.Contains("Kyber is listening on port", StringComparison.OrdinalIgnoreCase))
                 {
-                    var match = Regex.Match(e.Data, @"port (\d+)");
+                    var match = Regex.Match(
+                        e.Data,
+                        @"port\s+(\d+)",
+                        RegexOptions.IgnoreCase
+                    );
+
                     if (match.Success)
                     {
                         kyberPort = int.Parse(match.Groups[1].Value);
                         Console.WriteLine($"Detected Kyber RPC port: {kyberPort}");
                     }
-                }
-
-                if (e.Data.Contains("Setting Presence to Ingame: In the menus"))
-                {
-                    frontendReady = true;
-                    Console.WriteLine("Frontend ready detected.");
                 }
             };
 
@@ -292,69 +308,39 @@ class Program
 
             Console.WriteLine("Kyber gRPC server detected.");
 
-            /*
-            Console.WriteLine("Waiting for frontend initialization...");
-
-            DateTime frontendStart = DateTime.Now;
-
-            while (!frontendReady)
-            {
-                await Task.Delay(500);
-
-                if ((DateTime.Now - frontendStart).TotalSeconds > 120)
-                {
-                    throw new Exception("Timed out waiting for frontend.");
-                }
-            }
-
-            Console.WriteLine("Waiting additional time for network initialization...");
-            */
-
-            await Task.Delay(5000);
-
             string address = $"http://{host}:{kyberPort}";
             Console.WriteLine($"Connecting to {address}");
 
             var channel = GrpcChannel.ForAddress(address);
-
-            var client = new KyberInterface.Server.ServerClient(channel);
             var commonClient = new Common.CommonClient(channel);
 
-            var launchData = ResolveBattleLaunch(destinationPlanet, battleType);
+            Console.WriteLine(
+                "Waiting for Kyber to finish initializing the Galactic Conquest server..."
+            );
 
-            Console.WriteLine($"Resolved Map: {launchData.Map}");
-            Console.WriteLine($"Resolved Mode: {launchData.Mode}");
+            ServerState serverState = await WaitForServerReadyAsync(
+                commonClient,
+                cliProcess,
+                180
+            );
 
-            Console.WriteLine("Sending StartServer request...");
-
-            var request = new StartServerRequest
-            {
-                Name = $"Galactic Conquest: {destinationPlanet} - {battleType}",
-                Description = $"Battling on {destinationPlanet} for total control of the galaxy",
-                MaxPlayers = (uint)ResolveMaxPlayers(battleType),
-                Password = "",
-                ProximityChat = true,
-            };
-
-            request.MapRotation.Add(new LevelSetup
-            {
-                Map = launchData.Map,
-                Mode = launchData.Mode
-            });
-
-            var response = await client.StartServerAsync(request);
-
-            string serverId = response.Id;
-
-            Console.WriteLine($"Kyber Server ID: {serverId}");
+            string serverId = serverState.Id ?? "";
 
             Console.WriteLine();
             Console.WriteLine("====================================");
             Console.WriteLine("SERVER STARTED SUCCESSFULLY");
             Console.WriteLine("====================================");
-            Console.WriteLine();
 
-            Console.WriteLine(response);
+            if (string.IsNullOrWhiteSpace(serverId))
+            {
+                Console.WriteLine(
+                    "Kyber server is running locally. No online server ID has been reported yet."
+                );
+            }
+            else
+            {
+                Console.WriteLine($"Kyber Server ID: {serverId}");
+            }
 
             Console.WriteLine();
             Console.WriteLine("Kyber server is running.");
@@ -448,6 +434,64 @@ class Program
             Console.WriteLine("Press ENTER to exit...");
             Console.ReadLine();
         }
+    }
+
+    static async Task<ServerState> WaitForServerReadyAsync(
+        Common.CommonClient commonClient,
+        Process cliProcess,
+        int timeoutSeconds)
+    {
+        DateTime deadline = DateTime.Now.AddSeconds(timeoutSeconds);
+        Exception lastError = null;
+        bool reportedRetry = false;
+
+        while (DateTime.Now < deadline)
+        {
+            if (cliProcess != null && cliProcess.HasExited)
+            {
+                throw new Exception(
+                    $"Kyber CLI exited while waiting for the server to initialize " +
+                    $"(exit code {cliProcess.ExitCode})."
+                );
+            }
+
+            try
+            {
+                var info = await commonClient.GetInfoAsync(new Empty());
+
+                if (info != null && info.Server != null)
+                {
+                    Console.WriteLine("Kyber reported an active server state.");
+                    return info.Server;
+                }
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+
+                if (!reportedRetry)
+                {
+                    Console.WriteLine(
+                        "Kyber interface is reachable but the server is not ready yet. Retrying..."
+                    );
+                    reportedRetry = true;
+                }
+            }
+
+            await Task.Delay(1000);
+        }
+
+        if (lastError != null)
+        {
+            throw new Exception(
+                $"Timed out after {timeoutSeconds} seconds waiting for Kyber's server state.",
+                lastError
+            );
+        }
+
+        throw new Exception(
+            $"Timed out after {timeoutSeconds} seconds waiting for Kyber's server state."
+        );
     }
 
     static async Task AssignConfiguredPlayersToTeamsAsync(
@@ -951,21 +995,59 @@ class Program
         );
     }
 
-    static string BuildStartGameArguments(string rawModsPath)
+    static string BuildStartServerArguments(
+        string destinationPlanet,
+        string battleType,
+        string map,
+        string mode,
+        string rawModsPath)
     {
-        // The current Kyber CLI performs its own Maxima -> Kyber authentication inside
-        // start_game. The CLI module-update check runs before that authentication, so
-        // skip the updater here and use the module maintained by the official launcher.
-        string arguments = "--skip-updates start_game";
+        string serverName =
+            $"Galactic Conquest: {destinationPlanet} - {battleType}";
+
+        string serverDescription =
+            $"Battling on {destinationPlanet} for total control of the galaxy";
+
+        int maxPlayers = ResolveMaxPlayers(battleType);
+
+        List<string> parts = new List<string>
+        {
+            "--skip-updates",
+            "start_server",
+            "--no-dedicated",
+            "--server-name",
+            QuoteCliArgument(serverName),
+            "--server-description",
+            QuoteCliArgument(serverDescription),
+            "--max-players",
+            maxPlayers.ToString(),
+            "--map",
+            QuoteCliArgument(map),
+            "--mode",
+            QuoteCliArgument(mode)
+        };
 
         if (!string.IsNullOrWhiteSpace(rawModsPath))
         {
-            arguments += $" --raw-mods \"{rawModsPath}\"";
+            parts.Add("--raw-mods");
+            parts.Add(QuoteCliArgument(rawModsPath));
         }
+
+        string arguments = string.Join(" ", parts);
 
         Console.WriteLine($"Kyber CLI Arguments: {arguments}");
 
         return arguments;
+    }
+
+    static string QuoteCliArgument(string value)
+    {
+        if (value == null)
+        {
+            return "\"\"";
+        }
+
+        return "\"" + value.Replace("\"", "\\\"") + "\"";
     }
 
     static string CreateRawModsJsonForActiveMods(string baseDir)
@@ -1295,30 +1377,93 @@ class Program
 
     static string FindLatestKyberLogFile()
     {
-        string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        List<string> candidates = new List<string>();
 
-        string kyberRoot = Path.Combine(
+        string appData = Environment.GetFolderPath(
+            Environment.SpecialFolder.ApplicationData
+        );
+
+        string kyberAppDataRoot = Path.Combine(
             appData,
             "ArmchairDevelopers",
             "Kyber"
         );
 
-        if (!Directory.Exists(kyberRoot))
+        // Current Kyber module builds write kyber.log / kyber-server.log here.
+        string currentLogRoot = Path.Combine(
+            kyberAppDataRoot,
+            "Logs"
+        );
+
+        TryAddKyberLogs(currentLogRoot, candidates);
+
+        // Keep scanning the wider AppData tree as a compatibility fallback for
+        // older Kyber builds that used timestamped or differently placed logs.
+        TryAddKyberLogs(kyberAppDataRoot, candidates);
+
+        // Some installations/tools may also place Kyber logs alongside the
+        // shared module tree under ProgramData, so include it as a final fallback.
+        string programData = Environment.GetFolderPath(
+            Environment.SpecialFolder.CommonApplicationData
+        );
+
+        if (string.IsNullOrWhiteSpace(programData))
         {
-            throw new Exception($"Kyber AppData folder not found: {kyberRoot}");
+            programData = Environment.GetEnvironmentVariable("ProgramData")
+                ?? @"C:\ProgramData";
         }
 
-        string[] logFiles = Directory
-            .GetFiles(kyberRoot, "kyber_*.log", SearchOption.AllDirectories)
+        string programDataLogRoot = Path.Combine(
+            programData,
+            "Kyber",
+            "Logs"
+        );
+
+        TryAddKyberLogs(programDataLogRoot, candidates);
+
+        string latest = candidates
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(path => File.GetLastWriteTimeUtc(path))
-            .ToArray();
+            .FirstOrDefault();
 
-        if (logFiles.Length == 0)
+        if (string.IsNullOrWhiteSpace(latest))
         {
-            throw new Exception($"No Kyber log files found under: {kyberRoot}");
+            throw new Exception(
+                "No Kyber log files were found. Checked: " +
+                $"{currentLogRoot}, {kyberAppDataRoot}, and {programDataLogRoot}"
+            );
         }
 
-        return logFiles[0];
+        return latest;
+    }
+
+    static void TryAddKyberLogs(
+        string root,
+        List<string> destination)
+    {
+        if (string.IsNullOrWhiteSpace(root) ||
+            destination == null ||
+            !Directory.Exists(root))
+        {
+            return;
+        }
+
+        try
+        {
+            destination.AddRange(
+                Directory.GetFiles(
+                    root,
+                    "kyber*.log",
+                    SearchOption.AllDirectories
+                )
+            );
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"Could not scan Kyber log directory '{root}': {ex.Message}"
+            );
+        }
     }
 
     static long GetFileLengthSafe(string path)
@@ -1634,7 +1779,7 @@ class Program
         }
 
         Console.WriteLine(
-            "Kyber CLI update check will be skipped; Kyber CLI will handle authentication during start_game."
+            "Kyber CLI update check will be skipped; Kyber CLI will handle authentication and server initialization during start_server."
         );
     }
 }
